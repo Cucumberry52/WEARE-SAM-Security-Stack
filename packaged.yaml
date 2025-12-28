@@ -1,0 +1,680 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'WEARE Security Automation System - Final Production Ready (Fixed: CloudTrail
+  ARN & IAM Policies)'
+Parameters:
+  TargetVpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: "\uBCF4\uC548 \uADF8\uB8F9(\uACA9\uB9AC \uACF5\uAC04)\uC744 \uC0DD\
+      \uC131\uD560 VPC\uB97C \uC120\uD0DD\uD558\uC138\uC694."
+  SlackWebhookUrl:
+    Type: String
+    Description: "Slack Webhook URL\uC744 \uC785\uB825\uD558\uC138\uC694."
+    NoEcho: true
+  OpenAIKey:
+    Type: String
+    Description: "OpenAI API Key\uB97C \uC785\uB825\uD558\uC138\uC694."
+    NoEcho: true
+  MaxMindLicenseKey:
+    Type: String
+    Description: "MaxMind GeoIP DB \uB2E4\uC6B4\uB85C\uB4DC\uB97C \uC704\uD55C \uB77C\
+      \uC774\uC120\uC2A4 \uD0A4"
+    NoEcho: true
+  ContactEmail:
+    Type: String
+    Description: "\uAE34\uAE09 \uC54C\uB9BC\uC744 \uBC1B\uC744 \uC774\uBA54\uC77C\
+      \ \uC8FC\uC18C\uB97C \uC785\uB825\uD558\uC138\uC694."
+    Default: admin@example.com
+  EnableAWSConfig:
+    Type: String
+    Default: Y
+    AllowedValues:
+    - Y
+    - N
+    Description: "AWS Config(\uAC10\uC2DC \uAE30\uB85D)\uAC00 \uAEBC\uC838 \uC788\uB2E4\
+      \uBA74 'Y', \uC774\uBBF8 \uCF1C\uC838 \uC788\uB2E4\uBA74 'N'\uC744 \uC120\uD0DD\
+      \uD558\uC138\uC694."
+Globals:
+  Function:
+    Timeout: 60
+    Runtime: python3.13
+    Architectures:
+    - x86_64
+    MemorySize: 512
+    Environment:
+      Variables:
+        TZ: Asia/Seoul
+  Api:
+    OpenApiVersion: 3.0.1
+    EndpointConfiguration: REGIONAL
+Conditions:
+  CreateConfigResources:
+    Fn::Equals:
+    - Ref: EnableAWSConfig
+    - Y
+Resources:
+  CentralHubTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: WEARE_CentralHub
+    Metadata:
+      SamResourceId: CentralHubTopic
+  NotifierTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: WEARE_SNSB
+      Subscription:
+      - Protocol: email
+        Endpoint:
+          Ref: ContactEmail
+    Metadata:
+      SamResourceId: NotifierTopic
+  IsolationSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: '[WEARE] Isolation Group (Inbound Blocked)'
+      VpcId:
+        Ref: TargetVpcId
+      SecurityGroupIngress: []
+      Tags:
+      - Key: Name
+        Value: WEARE_Isolation_SG
+    Metadata:
+      SamResourceId: IsolationSecurityGroup
+  CloudTrailBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName:
+        Fn::Sub: weare-cloudtrail-logs-${AWS::AccountId}-${AWS::Region}-v1
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+    Metadata:
+      SamResourceId: CloudTrailBucket
+  CloudTrailBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket:
+        Ref: CloudTrailBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: AWSCloudTrailAclCheck
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: s3:GetBucketAcl
+          Resource:
+            Fn::GetAtt:
+            - CloudTrailBucket
+            - Arn
+        - Sid: AWSCloudTrailWrite
+          Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: s3:PutObject
+          Resource:
+            Fn::Sub: ${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/*
+          Condition:
+            StringEquals:
+              s3:x-amz-acl: bucket-owner-full-control
+        - Sid: AWSConfigBucketPermissionsCheck
+          Effect: Allow
+          Principal:
+            Service: config.amazonaws.com
+          Action: s3:GetBucketAcl
+          Resource:
+            Fn::GetAtt:
+            - CloudTrailBucket
+            - Arn
+        - Sid: AWSConfigBucketDelivery
+          Effect: Allow
+          Principal:
+            Service: config.amazonaws.com
+          Action: s3:PutObject
+          Resource:
+            Fn::Sub: ${CloudTrailBucket.Arn}/AWSLogs/${AWS::AccountId}/Config/*
+          Condition:
+            StringEquals:
+              s3:x-amz-acl: bucket-owner-full-control
+    Metadata:
+      SamResourceId: CloudTrailBucketPolicy
+  WEARECloudTrail:
+    Type: AWS::CloudTrail::Trail
+    DependsOn:
+    - CloudTrailBucketPolicy
+    - CloudTrailLogGroup
+    - CloudTrailToCWLogsRole
+    Properties:
+      TrailName: WEARE_CloudTrail
+      S3BucketName:
+        Ref: CloudTrailBucket
+      IsLogging: true
+      IncludeGlobalServiceEvents: true
+      IsMultiRegionTrail: true
+      CloudWatchLogsLogGroupArn:
+        Fn::GetAtt:
+        - CloudTrailLogGroup
+        - Arn
+      CloudWatchLogsRoleArn:
+        Fn::GetAtt:
+        - CloudTrailToCWLogsRole
+        - Arn
+    Metadata:
+      SamResourceId: WEARECloudTrail
+  GeoIPLibLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: GeoIP2-Python313-Lib
+      Description: Python 3.13 compatible layer for geoip2 library
+      ContentUri: s3://weare-team/755fc6e0389421eabee97bd9bbe6ee1e
+      CompatibleRuntimes:
+      - python3.13
+    Metadata:
+      BuildMethod: python3.13
+      SamResourceId: GeoIPLibLayer
+  CloudTrailLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName:
+        Fn::Sub: weare-cloudtrail-logs-${AWS::AccountId}-${AWS::Region}
+      RetentionInDays: 14
+    Metadata:
+      SamResourceId: CloudTrailLogGroup
+  CloudTrailToCWLogsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: cloudtrail.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: AllowCloudTrailToCWLogs
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+              Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:${CloudTrailLogGroup}:log-stream:*
+    Metadata:
+      SamResourceId: CloudTrailToCWLogsRole
+  ConfigRecorderRole:
+    Type: AWS::IAM::Role
+    Condition: CreateConfigResources
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: config.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+      - arn:aws:iam::aws:policy/service-role/AWS_ConfigRole
+    Metadata:
+      SamResourceId: ConfigRecorderRole
+  ConfigRecorder:
+    Type: AWS::Config::ConfigurationRecorder
+    Condition: CreateConfigResources
+    DependsOn: ConfigDeliveryChannel
+    Properties:
+      Name: WEARE_Recorder
+      RoleARN:
+        Fn::GetAtt:
+        - ConfigRecorderRole
+        - Arn
+      RecordingGroup:
+        AllSupported: true
+        IncludeGlobalResourceTypes: true
+    Metadata:
+      SamResourceId: ConfigRecorder
+  ConfigDeliveryChannel:
+    Type: AWS::Config::DeliveryChannel
+    Condition: CreateConfigResources
+    DependsOn: CloudTrailBucketPolicy
+    Properties:
+      Name: WEARE_DeliveryChannel
+      S3BucketName:
+        Ref: CloudTrailBucket
+    Metadata:
+      SamResourceId: ConfigDeliveryChannel
+  ConfigStartFunctionRole:
+    Type: AWS::IAM::Role
+    Condition: CreateConfigResources
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: ConfigStartPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action:
+            - config:StartConfigurationRecorder
+            - config:DescribeConfigurationRecorderStatus
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource: '*'
+    Metadata:
+      SamResourceId: ConfigStartFunctionRole
+  ConfigStartFunction:
+    Type: AWS::Serverless::Function
+    Condition: CreateConfigResources
+    Properties:
+      FunctionName: WEARE_ConfigStart
+      CodeUri: s3://weare-team/ecb442baf157c2087eb722ece374377c
+      Handler: index.handler
+      Runtime: python3.13
+      Timeout: 60
+      Role:
+        Fn::GetAtt:
+        - ConfigStartFunctionRole
+        - Arn
+    Metadata:
+      SamResourceId: ConfigStartFunction
+  ConfigStartTrigger:
+    Type: Custom::ConfigStarter
+    Condition: CreateConfigResources
+    Properties:
+      ServiceToken:
+        Fn::GetAtt:
+        - ConfigStartFunction
+        - Arn
+    DependsOn: ConfigDeliveryChannel
+    Metadata:
+      SamResourceId: ConfigStartTrigger
+  ConfigRuleEbsPublic:
+    Type: AWS::Config::ConfigRule
+    Condition: CreateConfigResources
+    DependsOn: ConfigStartTrigger
+    Properties:
+      ConfigRuleName: ebs-snapshot-public-restorable-check
+      Source:
+        Owner: AWS
+        SourceIdentifier: EBS_SNAPSHOT_PUBLIC_RESTORABLE_CHECK
+      Scope:
+        ComplianceResourceTypes:
+        - AWS::EC2::Snapshot
+    Metadata:
+      SamResourceId: ConfigRuleEbsPublic
+  ConfigRuleRdsPublic:
+    Type: AWS::Config::ConfigRule
+    Condition: CreateConfigResources
+    DependsOn: ConfigStartTrigger
+    Properties:
+      ConfigRuleName: rds-snapshots-public-prohibited
+      Source:
+        Owner: AWS
+        SourceIdentifier: RDS_SNAPSHOTS_PUBLIC_PROHIBITED
+      Scope:
+        ComplianceResourceTypes:
+        - AWS::RDS::DBSnapshot
+    Metadata:
+      SamResourceId: ConfigRuleRdsPublic
+  EventBridgeToSNSRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: events.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: AllowPublishToSNS
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: sns:Publish
+            Resource:
+            - Ref: NotifierTopic
+            - Ref: CentralHubTopic
+    Metadata:
+      SamResourceId: EventBridgeToSNSRole
+  SlackWebhookParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /secops/slack/webhook
+      Type: String
+      Value:
+        Ref: SlackWebhookUrl
+    Metadata:
+      SamResourceId: SlackWebhookParam
+  OpenAIKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: OPENAI_API_KEY
+      Type: String
+      Value:
+        Ref: OpenAIKey
+    Metadata:
+      SamResourceId: OpenAIKeyParam
+  MaxMindLicenseKeyParam:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /secops/maxmind/licensekey
+      Type: String
+      Value:
+        Ref: MaxMindLicenseKey
+    Metadata:
+      SamResourceId: MaxMindLicenseKeyParam
+  IPlistUpdaterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: WEARE_IPlist_Updater
+      CodeUri: s3://weare-team/07b452f38f196b6ce9db48c0c2e172de
+      Handler: lambda_function.lambda_handler
+      Timeout: 900
+      MemorySize: 1024
+      Runtime: python3.13
+      Policies:
+      - AmazonS3FullAccess
+      - AmazonSSMReadOnlyAccess
+      - AmazonSNSFullAccess
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - lambda:PublishLayerVersion
+          - lambda:GetLayerVersion
+          - lambda:GetFunctionConfiguration
+          - lambda:UpdateFunctionConfiguration
+          Resource: '*'
+      Environment:
+        Variables:
+          FUNCTION_TO_UPDATE: WEARE_Glober-IPdetector
+          SNS_A_TOPIC_ARN:
+            Ref: CentralHubTopic
+          SSM_LICENSE_KEY_PARAM_NAME: /secops/maxmind/licensekey
+          LAYER_NAME: GeoIP-Data-Layer
+          MAXMIND_EDITION_ID: GeoLite2-Country
+          COMPATIBLE_RUNTIME: python3.13
+      Events:
+        WeeklyUpdate:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 0 ? * SUN *)
+    Metadata:
+      SamResourceId: IPlistUpdaterFunction
+  GloberIPDetectorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: WEARE_Glober-IPdetector
+      CodeUri: s3://weare-team/34c71da764c04f8a593801e412109991
+      Handler: lambda_function.lambda_handler
+      Timeout: 300
+      MemorySize: 512
+      Runtime: python3.13
+      Layers:
+      - Ref: GeoIPLibLayer
+      Policies:
+      - AmazonSNSFullAccess
+      - AWSLambdaBasicExecutionRole
+      Environment:
+        Variables:
+          SNS_A_TOPIC_ARN:
+            Ref: CentralHubTopic
+      Events:
+        CloudTrailLogTrigger:
+          Type: CloudWatchLogs
+          Properties:
+            LogGroupName:
+              Fn::Sub: weare-cloudtrail-logs-${AWS::AccountId}-${AWS::Region}
+            FilterPattern: ''
+    Metadata:
+      SamResourceId: GloberIPDetectorFunction
+  SecurityActionFromSlackFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: SecurityAction_from_Slack_WEARE
+      CodeUri: s3://weare-team/12508a6e637d496e3cc8640e188643f4
+      Handler: index.handler
+      Policies:
+      - AmazonEC2FullAccess
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action: lambda:InvokeFunction
+          Resource:
+            Fn::GetAtt:
+            - SecurityActionWorkerFunction
+            - Arn
+      Environment:
+        Variables:
+          ISOLATION_SG_ID:
+            Ref: IsolationSecurityGroup
+          WORKER_FUNCTION_ARN:
+            Fn::GetAtt:
+            - SecurityActionWorkerFunction
+            - Arn
+      Events:
+        SlackApi:
+          Type: HttpApi
+          Properties:
+            Path: /slack-events
+            Method: post
+    Metadata:
+      SamResourceId: SecurityActionFromSlackFunction
+  SecurityActionWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: SecurityActionWorker_WEARE
+      CodeUri: s3://weare-team/773693c774393df69de1d5142c2444e5
+      Handler: index.handler
+      Policies:
+      - AmazonEC2FullAccess
+      Environment:
+        Variables:
+          ISOLATION_SG_ID:
+            Ref: IsolationSecurityGroup
+    Metadata:
+      SamResourceId: SecurityActionWorkerFunction
+  SecurityActionWorkerInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName:
+        Ref: SecurityActionWorkerFunction
+      Principal: lambda.amazonaws.com
+      SourceArn:
+        Fn::GetAtt:
+        - SecurityActionFromSlackFunction
+        - Arn
+    Metadata:
+      SamResourceId: SecurityActionWorkerInvokePermission
+  CentralFormatingFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: WEARE_CentralFormating
+      CodeUri: s3://weare-team/3715adba51a3683c7f74036f36df70d3
+      Handler: lambda_function.lambda_handler
+      Policies:
+      - AmazonSNSFullAccess
+      - AmazonSSMReadOnlyAccess
+      Environment:
+        Variables:
+          SLACK_WEBHOOK_PARAM_NAME: /secops/slack/webhook
+          OPENAI_API_KEY_PARAM_NAME: OPENAI_API_KEY
+          SNS_B_TOPIC_ARN:
+            Ref: NotifierTopic
+      Events:
+        SNSTrigger:
+          Type: SNS
+          Properties:
+            Topic:
+              Ref: CentralHubTopic
+    Metadata:
+      SamResourceId: CentralFormatingFunction
+  SlackNotifierFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: WEARE_SlackNotifier
+      CodeUri: s3://weare-team/04c31a32b6bac7c7a36148007d296911
+      Handler: lambda_function.lambda_handler
+      Policies:
+      - AmazonSSMReadOnlyAccess
+      Environment:
+        Variables:
+          TITLE_PREFIX: '[SECOPS]'
+          SLACK_WEBHOOK_PARAM: /secops/slack/webhook
+      Events:
+        SNSTrigger:
+          Type: SNS
+          Properties:
+            Topic:
+              Ref: NotifierTopic
+    Metadata:
+      SamResourceId: SlackNotifierFunction
+  SnapshotRemediationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: snapshot-auto-remediation_WEARE
+      CodeUri: s3://weare-team/acd4a023833734f8e13187aa6a7c3c64
+      Handler: lambda_function.lambda_handler
+      Policies:
+      - Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Action:
+          - ec2:DescribeSnapshots
+          - ec2:ModifySnapshotAttribute
+          - rds:DescribeDBSnapshots
+          - rds:DescribeDBSnapshotAttributes
+          - rds:ModifyDBSnapshotAttribute
+          Resource: '*'
+      Events:
+        ConfigRuleCompliance:
+          Type: CloudWatchEvent
+          Properties:
+            Pattern:
+              source:
+              - aws.config
+              detail-type:
+              - Config Rules Compliance Change
+              detail:
+                configRuleName:
+                - ebs-snapshot-public-restorable-check
+                - rds-snapshots-public-prohibited
+                newEvaluationResult:
+                  complianceType:
+                  - NON_COMPLIANT
+    Metadata:
+      SamResourceId: SnapshotRemediationFunction
+  GuardDutyAIBotFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: GuardDuty-AI-Bot-Handler_WEARE
+      CodeUri: s3://weare-team/d0e98ec1d64e9945c652e0c0cbd4df80
+      Handler: lambda_function.handler
+      Runtime: python3.13
+      Timeout: 300
+      MemorySize: 512
+      Policies:
+      - AmazonSSMReadOnlyAccess
+      - AmazonSNSFullAccess
+      Environment:
+        Variables:
+          OPENAI_API_KEY_PARAM_NAME: OPENAI_API_KEY
+          SLACK_WEBHOOK_PARAM_NAME: /secops/slack/webhook
+      Events:
+        GuardDutyHighSev:
+          Type: CloudWatchEvent
+          Properties:
+            Pattern:
+              source:
+              - aws.guardduty
+              detail-type:
+              - GuardDuty Finding
+              detail:
+                severity:
+                - numeric:
+                  - '>='
+                  - 7
+    Metadata:
+      SamResourceId: GuardDutyAIBotFunction
+  RootAccountLoginRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: WEARE_RootAccount_Detection
+      Description: Detects Root Account usage via CloudTrail
+      EventPattern:
+        source:
+        - aws.signin
+        detail-type:
+        - AWS Console Sign In via CloudTrail
+        detail:
+          userIdentity:
+            type:
+            - Root
+      Targets:
+      - Arn:
+          Ref: CentralHubTopic
+        Id: RootLoginAlertToCentralHub
+        RoleArn:
+          Fn::GetAtt:
+          - EventBridgeToSNSRole
+          - Arn
+    Metadata:
+      SamResourceId: RootAccountLoginRule
+  GuardDutyToCentralHubRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: WEARE_GuardDuty_Detection
+      Description: Detects High Severity GuardDuty Findings and sends to Central Hub
+      EventPattern:
+        source:
+        - aws.guardduty
+        detail-type:
+        - GuardDuty Finding
+        detail:
+          severity:
+          - numeric:
+            - '>='
+            - 7
+      Targets:
+      - Arn:
+          Ref: CentralHubTopic
+        Id: GuardDutyToCentralHub
+        RoleArn:
+          Fn::GetAtt:
+          - EventBridgeToSNSRole
+          - Arn
+    Metadata:
+      SamResourceId: GuardDutyToCentralHubRule
+  SeoulEventBusPolicy:
+    Type: AWS::Events::EventBusPolicy
+    Properties:
+      EventBusName: default
+      StatementId: AllowCrossRegionEvents
+      Statement:
+        Effect: Allow
+        Principal:
+          AWS:
+            Fn::Sub: arn:aws:iam::${AWS::AccountId}:root
+        Action: events:PutEvents
+        Resource:
+          Fn::Sub: arn:aws:events:${AWS::Region}:${AWS::AccountId}:event-bus/default
+    Metadata:
+      SamResourceId: SeoulEventBusPolicy
+Outputs:
+  SlackApiEndpoint:
+    Description: API Gateway endpoint URL for Slack Interaction
+    Value:
+      Fn::Sub: https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com/slack-events

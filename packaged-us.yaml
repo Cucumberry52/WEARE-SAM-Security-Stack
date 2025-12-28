@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: '[US-EAST-1] Root Login Forwarder to Seoul'
+Parameters:
+  TargetRegion:
+    Type: String
+    Default: ap-northeast-2
+  TargetAccount:
+    Type: String
+    Description: "\uC9C0\uD0DC \uB2D8\uC758 AWS \uACC4\uC815 ID (12\uC790\uB9AC \uC22B\
+      \uC790)\uB97C \uC785\uB825\uD558\uC138\uC694"
+Resources:
+  CrossRegionSenderRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: events.amazonaws.com
+          Action: sts:AssumeRole
+      Policies:
+      - PolicyName: SendToSeoulPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Effect: Allow
+            Action: events:PutEvents
+            Resource:
+              Fn::Sub: arn:aws:events:${TargetRegion}:${TargetAccount}:event-bus/default
+    Metadata:
+      SamResourceId: CrossRegionSenderRole
+  RootLoginCaptureRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: WEARE-RootLogin-US-Forwarder
+      Description: Capture Root Login in US and toss it to Seoul
+      EventPattern:
+        source:
+        - aws.signin
+        detail-type:
+        - AWS Console Sign In via CloudTrail
+        detail:
+          userIdentity:
+            type:
+            - Root
+      Targets:
+      - Id: SendToSeoulBus
+        Arn:
+          Fn::Sub: arn:aws:events:${TargetRegion}:${TargetAccount}:event-bus/default
+        RoleArn:
+          Fn::GetAtt:
+          - CrossRegionSenderRole
+          - Arn
+    Metadata:
+      SamResourceId: RootLoginCaptureRule
