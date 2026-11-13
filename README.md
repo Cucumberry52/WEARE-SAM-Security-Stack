@@ -4,6 +4,10 @@
 
 2025년 2학기 창의융합 자유연구 프로그램에서 진행했습니다. 계정 활동, 위협 탐지 결과, 리소스 설정 변경을 여러 콘솔에서 각각 확인해야 하는 문제를 줄이기 위해 AWS 이벤트를 한곳에 모으고, 반복되는 대응을 Lambda로 자동화했습니다.
 
+## 전체 아키텍처
+
+<a href="docs/aws-architecture.png"><img src="docs/aws-architecture.png" alt="WEARE AWS 보안 자동화 전체 아키텍처" width="900"></a>
+
 ## 어떤 이벤트를 처리하나요?
 
 | 이벤트 | 처리 흐름 |
